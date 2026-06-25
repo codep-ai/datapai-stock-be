@@ -15,14 +15,14 @@ from agents.trade_review.timing_analyzer import analyze_trade
 # A few illustrative US-equity trades. Replace with real moomoo fills once OpenD
 # is up: agents/trade_review/moomoo_client.py -> history_fills().
 SAMPLE_TRADES = [
-    dict(instrument="AAPL", direction="LONG",
-         entry_time=datetime(2024, 7, 15), entry_price=234.0,
-         exit_time=datetime(2024, 8, 5),  exit_price=209.0),   # bought near a local top
     dict(instrument="NVDA", direction="LONG",
-         entry_time=datetime(2024, 8, 7), entry_price=98.0,
-         exit_time=datetime(2024, 9, 6),  exit_price=102.0),   # sold a winner early?
-    dict(instrument="MSFT", direction="LONG",
-         entry_time=datetime(2024, 1, 8), entry_price=375.0,
+         entry_time=datetime(2025, 4, 9), entry_price=98.0,
+         exit_time=datetime(2025, 5, 12),  exit_price=120.0),  # sold a winner early?
+    dict(instrument="AAPL", direction="LONG",
+         entry_time=datetime(2025, 5, 13), entry_price=212.0,
+         exit_time=datetime(2025, 6, 9),  exit_price=201.0),   # bought a local top?
+    dict(instrument="TSLA", direction="LONG",
+         entry_time=datetime(2025, 3, 25), entry_price=288.0,
          exit_time=None, exit_price=None),                     # still open
 ]
 

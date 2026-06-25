@@ -151,12 +151,17 @@ def _judge_exit(s: Optional[dict], direction: str, mfe_pct, captured_pct) -> tup
         eff = round(max(0.0, min(1.0, captured_pct / mfe_pct)), 2)
     long = direction.upper() == "LONG"
     rsi, macd_hist = s.get("d_rsi"), s.get("d_macd_hist")
-    # SOLD EARLY: exited a winner while momentum still strong + left a lot on the table
+    # SOLD EARLY (A): exited a winner while momentum still strong
     if long and macd_hist is not None and macd_hist > 0 and rsi is not None and rsi < 65 \
             and eff is not None and eff < 0.5:
         reasons.append(f"exited at RSI {rsi:.0f} with momentum still positive; "
                        f"captured {eff:.0%} of the favourable move")
         return "sold_early", 0.3, eff, reasons
+    # SOLD EARLY (B): left most of a real move on the table, regardless of exit momentum
+    if eff is not None and eff < 0.35 and mfe_pct is not None and mfe_pct > 5:
+        reasons.append(f"captured only {eff:.0%} of a {mfe_pct:.0f}% favourable move "
+                       f"— exited well before the move was done")
+        return "sold_early", 0.35, eff, reasons
     # HELD LATE: exited a loser only after momentum broke down hard
     if long and macd_hist is not None and macd_hist < 0 and rsi is not None and rsi < 35:
         reasons.append(f"exited deep into weakness — RSI {rsi:.0f}, MACD hist {macd_hist:.2f}")
