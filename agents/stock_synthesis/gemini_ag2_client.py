@@ -74,6 +74,15 @@ def build_llm_config(
     }
 
 
+def _thinking_budget() -> int:
+    """Gemini reasoning-token budget for a debate turn (0 = off)."""
+    try:
+        from agents import llm_policy
+        return llm_policy.resolve()["thinking_budget"]
+    except Exception:
+        return 0
+
+
 # ── AG2 ModelClient implementation ───────────────────────────────────────────
 class GeminiHTTPModelClient:
     """
@@ -104,6 +113,34 @@ class GeminiHTTPModelClient:
         temperature = params.get("temperature", self._default_temperature)
         max_tokens = int(params.get("max_tokens") or 0) or self._max_tokens
 
+        # ── Call-class policy gate ──────────────────────────────────────────
+        # This is AG2's only entry point per debate turn, so gating here covers
+        # both branches below. It has to be here rather than in
+        # GoogleChatClient.chat(): the max_tokens branch calls Gemini over raw
+        # HTTP and never reaches the shared client's gate.
+        #
+        # Deliberately OUTSIDE the try. On mode='off' a scheduled run must fail
+        # loudly, not fall into the except and write an empty debate turn into
+        # the recommendation tables as if the agent had nothing to say.
+        from agents import llm_policy
+        policy = llm_policy.resolve()
+
+        if policy["mode"] == "off":
+            raise llm_policy.LLMDisabled(policy["call_class"], "google/ag2")
+
+        if policy["mode"] == "local":
+            logger.info(
+                "llm_policy: call class '%s' is mode=local; debate turn runs on "
+                "Ollama (%s) instead of billing Gemini",
+                policy["call_class"], policy["local_model"],
+            )
+            return self._chat_local(messages, temperature, policy)
+
+        # A scheduled run may only tighten the per-turn cap, never widen it.
+        pol_max = policy.get("max_output_tokens")
+        if max_tokens and pol_max:
+            max_tokens = min(max_tokens, pol_max)
+
         try:
             if max_tokens:
                 # Direct HTTP path with maxOutputTokens — GoogleChatClient's
@@ -124,6 +161,31 @@ class GeminiHTTPModelClient:
             prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
             completion_tokens=int(usage.get("completion_tokens", 0) or 0),
         )
+
+    # ── Internal: free local path when policy forbids paid calls ─────────────
+    def _chat_local(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        policy: Dict[str, Any],
+    ) -> Any:
+        """
+        Run this debate turn on the local Ollama model. Never bills.
+
+        Returns AG2's response shape so the GroupChat is unaware anything
+        changed. Usage is reported as zero because nothing was purchased.
+        """
+        try:
+            from agents.llm_client import OllamaChatClient
+            raw = OllamaChatClient(model=policy["local_model"]).chat(
+                messages=messages, temperature=temperature
+            )
+            content = raw.get("content", "") if isinstance(raw, dict) else str(raw or "")
+        except Exception as exc:
+            logger.error("Local debate turn failed on %s: %s",
+                         policy["local_model"], str(exc)[:200])
+            content = ""
+        return _build_response(content=content, model=policy["local_model"])
 
     # ── Internal: direct Gemini HTTP call with maxOutputTokens ───────────────
     def _chat_with_max_tokens(
@@ -152,17 +214,30 @@ class GeminiHTTPModelClient:
                 # left only ~20 tokens for the PM's JSON → consistent truncation
                 # at `"confidence": 0.6` mid-string. Setting thinkingBudget=0
                 # disables thinking so the entire budget is available for output.
-                "thinkingConfig": {"thinkingBudget": 0},
+                # thinkingBudget comes from llm_policy now (still 0 by
+                # default) so it stays tunable from sys_common_config.
+                "thinkingConfig": {"thinkingBudget": _thinking_budget()},
             },
         }
         r = requests.post(url, json=payload, timeout=120)
         r.raise_for_status()
         data = r.json()
-        try:
-            text = data["candidates"][0]["content"]["parts"][0]["text"]
-        except (KeyError, IndexError):
-            text = ""
+
+        # Join every part rather than indexing [0], and say something when the
+        # turn comes back empty. Swallowing this into "" made a failed agent
+        # turn indistinguishable from an agent with nothing to add -- the
+        # debate simply carried on with a blank contribution.
+        candidates = data.get("candidates") or []
+        parts = ((candidates[0].get("content") or {}).get("parts") or []) if candidates else []
+        text = "".join(part.get("text", "") for part in parts)
         usage = data.get("usageMetadata", {}) or {}
+        if not text:
+            finish = candidates[0].get("finishReason") if candidates else "no candidates"
+            logger.warning(
+                "Empty Gemini debate turn (finishReason=%s, thoughts=%s, answer=%s, "
+                "maxOutputTokens=%s)", finish, usage.get("thoughtsTokenCount"),
+                usage.get("candidatesTokenCount"), max_tokens,
+            )
         return {
             "role": "assistant",
             "content": text,
