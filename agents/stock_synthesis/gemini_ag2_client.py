@@ -74,13 +74,36 @@ def build_llm_config(
     }
 
 
-def _thinking_budget() -> int:
-    """Gemini reasoning-token budget for a debate turn (0 = off)."""
+# A debate turn needs at least this much headroom before dynamic thinking is
+# safe. Thinking is billed inside maxOutputTokens, and turns here are capped at
+# 800, so an unbounded budget would consume the turn and emit nothing -- the
+# 2026-05-24 truncation, exactly.
+_MIN_TOKENS_FOR_THINKING = 2048
+
+
+def _thinking_budget(max_tokens: int = 0) -> int:
+    """
+    Gemini reasoning-token budget for a debate turn (0 = off).
+
+    Reads llm_policy so it stays tunable, but refuses a dynamic budget when the
+    per-turn cap is too small to hold both the reasoning and the answer. The
+    ad-hoc default is -1 (model decides), which is right for a single long
+    answer and wrong for an 800-token debate turn.
+    """
     try:
         from agents import llm_policy
-        return llm_policy.resolve()["thinking_budget"]
+        budget = llm_policy.resolve()["thinking_budget"]
     except Exception:
         return 0
+
+    if budget != 0 and max_tokens and max_tokens < _MIN_TOKENS_FOR_THINKING:
+        logger.info(
+            "Forcing thinkingBudget=0: per-turn cap %d is below %d, so thinking "
+            "would consume the turn and leave no answer.",
+            max_tokens, _MIN_TOKENS_FOR_THINKING,
+        )
+        return 0
+    return budget
 
 
 # ── AG2 ModelClient implementation ───────────────────────────────────────────
@@ -216,7 +239,7 @@ class GeminiHTTPModelClient:
                 # disables thinking so the entire budget is available for output.
                 # thinkingBudget comes from llm_policy now (still 0 by
                 # default) so it stays tunable from sys_common_config.
-                "thinkingConfig": {"thinkingBudget": _thinking_budget()},
+                "thinkingConfig": {"thinkingBudget": _thinking_budget(max_tokens)},
             },
         }
         r = requests.post(url, json=payload, timeout=120)
