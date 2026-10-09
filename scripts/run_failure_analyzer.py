@@ -89,27 +89,31 @@ def _any_gate_fired(gate_decisions: Any) -> bool:
 def _signature_for_row(row: dict, horizon_days: int) -> Dict[str, Any]:
     """Build the cluster signature for one debate row.
 
-    NOTE: conviction + signals_aligned + gate_decisions live on
-    stock_synthesis, not sys_agent_debate_log. They're enriched from
-    the synthesis-row join in main_async, then folded in here.
-
-    2026-05-28: `was_relabeled` added. After migration 049, ex-broken-
-    fallback rows carry direction=WATCH with relabeled_from_dir='HOLD'.
-    The "broken-fallback dominant cluster" is a KNOWN RESOLVED issue —
-    surfacing it in failure_patterns just creates noise. Keeping it
-    separate so the analyzer can either filter it out or label it
-    explicitly as the resolved pattern.
+    2026-05-29: `missed_momentum` added. The TEAM/SNOW/GTLB postmortem
+    pattern — WATCH/HOLD calls where the stock then moved >10% absolute
+    in the horizon window. These deserve a distinct cluster name on
+    /admin/failure-patterns so the human reviewer can spot momentum-
+    related failures separately from "stayed range-bound = correct"
+    deferrals.
     """
+    direction = row.get("direction")
+    ret_pct = row.get("ret")
+    missed_momentum = (
+        direction in ("WATCH", "HOLD")
+        and ret_pct is not None
+        and abs(float(ret_pct)) > 10.0
+    )
     return {
-        "horizon_days":    horizon_days,
-        "direction":       row.get("direction"),
-        "conf_band":       _conf_band(row.get("confidence")),
-        "thesis_empty":    not (row.get("thesis") and len((row.get("thesis") or "").strip()) >= 20),
-        "quality_tier":    row.get("quality_tier") or "NULL",
-        "regime":          row.get("regime") or "NULL",
-        "any_gate_fired":  _any_gate_fired(row.get("gate_decisions")),
-        "signals_aligned": bool(row.get("signals_aligned")),
-        "was_relabeled":   bool(row.get("relabeled_from_dir")),
+        "horizon_days":     horizon_days,
+        "direction":        direction,
+        "conf_band":        _conf_band(row.get("confidence")),
+        "thesis_empty":     not (row.get("thesis") and len((row.get("thesis") or "").strip()) >= 20),
+        "quality_tier":     row.get("quality_tier") or "NULL",
+        "regime":           row.get("regime") or "NULL",
+        "any_gate_fired":   _any_gate_fired(row.get("gate_decisions")),
+        "signals_aligned":  bool(row.get("signals_aligned")),
+        "was_relabeled":    bool(row.get("relabeled_from_dir")),
+        "missed_momentum":  missed_momentum,
     }
 
 
@@ -119,6 +123,8 @@ def _signature_to_text(sig: Dict[str, Any]) -> str:
         f"direction={sig['direction']}",
         f"confidence{sig['conf_band']}",
     ]
+    if sig.get("missed_momentum"):
+        parts.append("⚠ missed_momentum (stock moved >10% while we deferred)")
     if sig["thesis_empty"]:
         parts.append("thesis_empty (likely broken-fallback)")
     if sig["quality_tier"] != "NULL":

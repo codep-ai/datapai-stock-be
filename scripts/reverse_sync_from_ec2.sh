@@ -1,86 +1,107 @@
 #!/bin/bash
-# Reverse-sync EC2 → local for EC2-deployed repos. EC2 is where code is developed,
-# built and tested; local git is only the commit surface. Run this BEFORE any local
-# commit or push (rule restated by Donny 2026-09-10).
+# Reverse-sync EC2 → local for all rsync-deployed repos. Run this at the
+# START of any session that will touch EC2-deployed code, BEFORE any local
+# commit or push. EC2 is the source of truth — hotfixes land there first.
 #
-# Default mode: DRY-RUN. Pass --apply to pull.
-# Pull policy: --update (only files that are newer on EC2, or exist only on EC2) with
-# checksum comparison. Files where LOCAL is newer are never overwritten; they are listed
-# under "pending forward deploy" so you can rsync them up (additively, never --delete).
+# Default mode: DRY-RUN (shows what would change, touches nothing).
+# Apply: pass --apply.
 #
 # Usage:
-#   scripts/reverse_sync_from_ec2.sh                 # dry-run, all repos
-#   scripts/reverse_sync_from_ec2.sh --apply          # pull EC2 → local
-#   scripts/reverse_sync_from_ec2.sh --repo datapai-platform-be [--apply]
+#   scripts/reverse_sync_from_ec2.sh           # dry-run, show divergence
+#   scripts/reverse_sync_from_ec2.sh --apply   # actually pull EC2 → local
 #
-# Per-repo extra excludes: scripts/reverse_sync_excludes/<repo>.txt (rsync --exclude-from),
-# e.g. datapai-stock-be scripts that were copied into platform-be on EC2 by hand.
+# Does NOT touch repos that have their own .git on EC2 (platform-be,
+# airflow) — those need `git bundle` for EC2-only commits; reminder
+# printed at the end.
 
 set -u
 
 EC2="ec2-user@platform.datap.ai"
 KEY="$HOME/.ssh/Linux-CodeCambat.pem"
 SSH_OPTS="-i $KEY -o StrictHostKeyChecking=no"
-HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# Standard excludes — keep aligned with CLAUDE.md / memory.
 EXCLUDES=(
-    --exclude .git --exclude __pycache__ --exclude "*.pyc" --exclude node_modules --exclude .next
-    --exclude target --exclude dbt_packages --exclude logs --exclude ".env*" --exclude out
-    --exclude .venv --exclude venv --exclude .pytest_cache --exclude .DS_Store --exclude .claude
-    --exclude .gstack --exclude "*.bak*" --exclude "*.duckdb" --exclude "*.sqlite"
+    --exclude .git
+    --exclude __pycache__
+    --exclude node_modules
+    --exclude .next
+    --exclude target
+    --exclude dbt_packages
+    --exclude logs
+    --exclude ".env*"
+    --exclude out
+    --exclude .venv
 )
 
-# Repos deployed by rsync (no usable .git on EC2). datapai-platform-be on EC2 is NOT a git
-# checkout (verified 2026-09-09) — it belongs here, not in a git-bundle flow.
-REPOS=(
-    datapai-platform-be
-    datapai-ai-etl
+# rsync-deployed repos (no .git on EC2)
+RSYNC_REPOS=(
     datapai-stock-be
     datapai-platform-menu
     datapai-dbt-governance
-    dbt-demo
 )
 
-APPLY=0; ONLY=""; ALLOW_DIRTY=0
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --apply) APPLY=1 ;;
-        --repo) ONLY="$2"; shift ;;
-        --allow-dirty) ALLOW_DIRTY=1 ;;   # pull even with uncommitted local changes (the --update rule still protects newer local files)
-        *) echo "unknown arg $1" >&2; exit 2 ;;
-    esac
-    shift
-done
+# git repos on EC2 — flagged for bundle-based sync, not covered here
+GIT_REPOS=(
+    datapai-platform-be
+    datapai-airflow
+)
+
+APPLY=0
+if [[ "${1:-}" == "--apply" ]]; then APPLY=1; fi
+
+FLAGS=(-avz --itemize-changes)
+[[ $APPLY -eq 0 ]] && FLAGS+=(--dry-run)
 
 echo "EC2 reverse-sync — mode: $([[ $APPLY -eq 1 ]] && echo APPLY || echo dry-run)"
 echo "───────────────────────────────────────────────────────────"
 
-for repo in "${REPOS[@]}"; do
-    [[ -n "$ONLY" && "$repo" != "$ONLY" ]] && continue
+# SAFETY — refuse --apply if any target repo has uncommitted working-tree
+# changes. Prevents the exact incident from 2026-04-21 where my local
+# in-flight edits were silently clobbered by older EC2 versions.
+if [[ $APPLY -eq 1 ]]; then
+    dirty=""
+    for repo in "${RSYNC_REPOS[@]}"; do
+        d="$HOME/git/$repo"
+        [[ ! -d "$d/.git" ]] && continue
+        if ! git -C "$d" diff --quiet || ! git -C "$d" diff --cached --quiet; then
+            dirty="$dirty\n  - $repo"
+        fi
+    done
+    if [[ -n "$dirty" ]]; then
+        echo "ABORT: uncommitted changes in:" >&2
+        echo -e "$dirty" >&2
+        echo >&2
+        echo "Commit, stash, or discard them first. EC2 sync would overwrite." >&2
+        echo "  git -C ~/git/<repo> stash       # to keep work, pull, then stash pop" >&2
+        exit 1
+    fi
+fi
+
+for repo in "${RSYNC_REPOS[@]}"; do
     local_dir="$HOME/git/$repo"
     remote_dir="/home/ec2-user/git/$repo/"
-    [[ ! -d "$local_dir" ]] && { echo "⚠  $repo — local dir missing, skipped"; continue; }
-    extra=()
-    [[ -f "$HERE/reverse_sync_excludes/$repo.txt" ]] && extra=(--exclude-from "$HERE/reverse_sync_excludes/$repo.txt")
-
-    # Safety: refuse --apply on a dirty working tree (an in-flight local edit would be clobbered).
-    if [[ $APPLY -eq 1 && $ALLOW_DIRTY -eq 0 && -d "$local_dir/.git" ]]; then
-        if ! git -C "$local_dir" diff --quiet || ! git -C "$local_dir" diff --cached --quiet; then
-            echo "▶ $repo — ABORT: uncommitted local changes; commit or set them aside first." >&2
-            continue
-        fi
+    if [[ ! -d "$local_dir" ]]; then
+        echo "⚠  $repo  — local dir missing, skipped"
+        continue
     fi
-
-    echo "▶ $repo  (EC2 → local, only EC2-newer / EC2-only files)"
-    flags=(-rtcz --update --itemize-changes); [[ $APPLY -eq 0 ]] && flags+=(--dry-run)
-    rsync "${flags[@]}" "${EXCLUDES[@]}" "${extra[@]}" -e "ssh $SSH_OPTS" "$EC2:$remote_dir" "$local_dir/" 2>/dev/null \
-        | grep -E "^>f" | awk '{print "    pull  " $2}'
-    echo "  pending forward deploy (LOCAL newer than EC2 — not touched):"
-    rsync -rtcn --update --itemize-changes "${EXCLUDES[@]}" "${extra[@]}" -e "ssh $SSH_OPTS" "$local_dir/" "$EC2:$remote_dir" 2>/dev/null \
-        | grep -E "^<f" | awk '{print "    local " $2}' | head -30
+    echo "▶ $repo"
+    rsync "${FLAGS[@]}" "${EXCLUDES[@]}" \
+        -e "ssh $SSH_OPTS" \
+        "$EC2:$remote_dir" "$local_dir/" \
+        | grep -vE "^(sending|sent|total|receiving|\./$|^$)" | sed 's/^/    /'
     echo
 done
 
 echo "───────────────────────────────────────────────────────────"
-echo "Next: review \`git status\` in each repo, commit the pulled hotfixes, then push (with confirmation)."
-echo "Forward deploy of local-newer files: rsync -avz (NO --delete) local → EC2, then test on EC2."
+echo "Not covered above (have .git on EC2 — use git bundle):"
+for repo in "${GIT_REPOS[@]}"; do
+    echo "  $repo"
+done
+echo
+echo "Bundle pattern for those:"
+echo "  ssh $EC2 'cd ~/git/<repo> && git bundle create /tmp/<repo>.bundle origin/<branch>..<branch>'"
+echo "  scp $EC2:/tmp/<repo>.bundle /tmp/"
+echo "  cd ~/git/<repo> && git fetch /tmp/<repo>.bundle <branch>"
+echo "  git log --oneline HEAD..FETCH_HEAD    # see EC2-only commits"
+echo "  git merge --no-edit FETCH_HEAD        # or cherry-pick"

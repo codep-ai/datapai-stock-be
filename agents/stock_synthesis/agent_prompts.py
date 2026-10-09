@@ -116,9 +116,14 @@ WHEN TO USE WATCH vs HOLD:
 
 WHEN TO USE AVOID vs SELL:
   - SELL = "exit the position" — applies to existing holders.
-  - AVOID = "stay away" — applies even when there's no position to exit.
-            Use when fraud, bankruptcy risk, sanctions, or other material adverse
-            events make engagement imprudent regardless of holder status.
+  - AVOID = "stay away" — STRICT TEST: only use when there's a CRITICAL severity
+            material event (fraud confirmed, bankruptcy filing, regulatory ban,
+            sanctions, executive criminal investigation, accounting restatement).
+            Do NOT use AVOID for high valuation, low ROE, missed earnings, or
+            general bearish sentiment — those are SELL or STRONG_SELL territory.
+            Use SELL for "the stock is overvalued, exit if you hold". Use AVOID
+            only when the situation is so toxic a non-holder should refuse to
+            engage. Misuse of AVOID erodes its protective signal.
 
 CRITICAL NEWS OVERRIDE: If a CRITICAL severity material event has been detected (fraud, bankruptcy, major lawsuit, sanctions, regulatory ban, massive earnings miss), override your recommendation to AVOID (for non-positions) or STRONG_SELL (when the audience clearly holds the position). CRITICAL events represent existential or near-existential risk to the stock. Set confidence to 0.9+ when overriding due to CRITICAL news.
 
